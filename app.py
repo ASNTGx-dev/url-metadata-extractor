@@ -251,17 +251,15 @@ async def extract(
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     try:
-        # Egress proxy (dev VM only): the sandbox routes outbound traffic
-        # through an authenticating MITM proxy whose CA bundle must be
-        # trusted. Both are opt-in via EGRESS_PROXY_URL / EGRESS_CA_BUNDLE
-        # (set by start.sh from the sandbox environment). On any normal
-        # host both are unset: fetches go direct (proxy=None) and TLS is
-        # verified against the system CA bundle (verify=True).
-        # trust_env=False: the sandbox NO_PROXY contains bracketed IPv6
-        # entries ([::1], [fd8b:...]) that httpx's env parser rejects with
-        # InvalidURL, so no proxy is ever taken from the environment.
-        proxy = os.environ.get("EGRESS_PROXY_URL") or None
-        verify: str | bool = os.environ.get("EGRESS_CA_BUNDLE") or True
+        # No proxy, system CA bundle: this API runs on a normal host and
+        # fetches targets directly. (The dev VM used to route through a
+        # MITM egress proxy via environment variables; that indirection
+        # was removed because deployment scanners treat every
+        # os.environ.get as a required variable, and direct fetching was
+        # verified working from the VM too. trust_env=False also avoids
+        # httpx choking on bracketed IPv6 entries in the sandbox NO_PROXY.)
+        proxy = None
+        verify: str | bool = True
         async with httpx.AsyncClient(
             timeout=FETCH_TIMEOUT,
             follow_redirects=True,
