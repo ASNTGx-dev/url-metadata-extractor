@@ -195,8 +195,10 @@ def _extract_metadata(html: bytes, base_url: str) -> dict:
     icon_tag = soup.find("link", rel=re.compile(r"^(shortcut )?icon$", re.I))
     if icon_tag and icon_tag.get("href"):
         favicon = urljoin(base_url, icon_tag["href"])
-    else:
-        favicon = urljoin(base_url, "/favicon.ico")
+    # No icon tag -> favicon stays None. We deliberately do NOT guess
+    # "/favicon.ico": a guessed URL that 404s (e.g. example.com) is a
+    # false positive, and a favicon that was never declared is unknown,
+    # not "/favicon.ico".
 
     language = None
     html_tag = soup.find("html")
@@ -271,10 +273,45 @@ async def extract(
         ) as client:
             async with client.stream("GET", target) as resp:
                 if resp.status_code >= 400:
+                    # Error granularity (fix #4): target failures used to
+                    # collapse to a bare 502. Now the three failure modes
+                    # a caller can act on are distinct:
+                    #   404          -> the page does not exist (404)
+                    #   401/403/429  -> the target blocked us (403)
+                    #   5xx          -> the target server errored (502)
+                    #   other 4xx    -> passed through as 502 (unchanged)
+                    code = resp.status_code
+                    if code == 404:
+                        return JSONResponse(
+                            status_code=404,
+                            content={
+                                "detail": "Target returned HTTP 404 (page not found)."
+                            },
+                        )
+                    if code in (401, 403, 429):
+                        return JSONResponse(
+                            status_code=403,
+                            content={
+                                "detail": (
+                                    f"Target blocked the request "
+                                    f"(HTTP {code})."
+                                )
+                            },
+                        )
+                    if code >= 500:
+                        return JSONResponse(
+                            status_code=502,
+                            content={
+                                "detail": (
+                                    f"Target returned HTTP {code} "
+                                    f"(target server error)."
+                                )
+                            },
+                        )
                     return JSONResponse(
                         status_code=502,
                         content={
-                            "detail": f"Target returned HTTP {resp.status_code}."
+                            "detail": f"Target returned HTTP {code}."
                         },
                     )
                 content_type = resp.headers.get("content-type", "")
@@ -301,6 +338,14 @@ async def extract(
     except httpx.TimeoutException:
         return JSONResponse(
             status_code=504, content={"detail": "Target fetch timed out (10 s)."}
+        )
+    except httpx.ConnectError as exc:
+        # Target down / unreachable: distinct from target-blocked (403).
+        return JSONResponse(
+            status_code=502,
+            content={
+                "detail": f"Target is down or unreachable (connection failed: {exc})."
+            },
         )
     except httpx.HTTPError as exc:
         return JSONResponse(
